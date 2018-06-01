@@ -7,9 +7,7 @@ import sys
 from datetime import datetime
 from docopt import docopt
 import pandas
-from pprint import pformat
 from sklearn.metrics import get_scorer
-from sklearn.model_selection import GridSearchCV
 
 from .interfaces import annotate
 from .util import apply_kwargs
@@ -17,6 +15,7 @@ from .util import args_from_config
 from .util import initialize_config
 from .util import logger
 from .util import PluggableDecorator
+from .util import resolve_dotted_name
 from .util import timer
 
 
@@ -173,7 +172,10 @@ Options:
 
 @args_from_config
 def grid_search(dataset_loader_train, model, grid_search, scoring=None,
-                save_results=None, persist_best=False, model_persister=None):
+                save_results=None, persist_best=False, model_persister=None,
+                impl='sklearn.model_selection.GridSearchCV'):
+    LeSearch = resolve_dotted_name(impl)
+
     if persist_best and model_persister is None:
         raise ValueError(
             "Cannot persist the best model without a model_persister. Please "
@@ -183,25 +185,25 @@ def grid_search(dataset_loader_train, model, grid_search, scoring=None,
     with timer(logger.info, "Loading data"):
         X, y = dataset_loader_train()
 
-    grid_search_kwargs = {
+    search_kwargs = {
         'refit': persist_best,
         }
-    grid_search_kwargs.update(grid_search)
+    search_kwargs.update(grid_search)
 
-    cv = grid_search_kwargs.get('cv', None)
+    cv = search_kwargs.get('cv', None)
     if callable(cv):
-        grid_search_kwargs['cv'] = apply_kwargs(cv, n=len(y), X=X, y=y)
+        search_kwargs['cv'] = apply_kwargs(cv, n=len(y), X=X, y=y)
 
-    if 'scoring' in grid_search_kwargs:
+    if 'scoring' in search_kwargs:
         warn("Use of 'scoring' inside of 'grid_search' is deprecated. "
              "To fix, move 'scoring' up to the top level of the configuration "
              "dict.", DeprecationWarning)
         if scoring is not None:
             raise ValueError("You cannot define 'scoring' in 'grid_search' "
                              "and globally.")
-        scoring = grid_search_kwargs['scoring']
+        scoring = search_kwargs['scoring']
     elif scoring is not None:
-        grid_search_kwargs['scoring'] = scoring
+        search_kwargs['scoring'] = scoring
 
     if not (hasattr(model, 'score') or scoring is not None):
         raise ValueError(
@@ -210,10 +212,10 @@ def grid_search(dataset_loader_train, model, grid_search, scoring=None,
             )
 
     with timer(logger.info, "Running grid search"):
-        gs = GridSearchCV(model, **grid_search_kwargs)
-        gs.fit(X, y)
+        search = LeSearch(model, **search_kwargs)
+        search.fit(X, y)
 
-    results = pandas.DataFrame(gs.cv_results_)
+    results = pandas.DataFrame(search.cv_results_)
     pandas.options.display.max_rows = len(results)
     pandas.options.display.max_columns = len(results.columns)
     if 'rank_test_score' in results:
@@ -222,8 +224,8 @@ def grid_search(dataset_loader_train, model, grid_search, scoring=None,
     if save_results:
         results.to_csv(save_results, index=False)
     if persist_best:
-        _persist_model(gs, model_persister, activate=True)
-    return gs
+        _persist_model(search, model_persister, activate=True)
+    return search
 
 
 def grid_search_cmd(argv=sys.argv[1:]):  # pragma: no cover
@@ -240,6 +242,7 @@ Usage:
 Options:
   --save-results=<fname>   Save results to CSV file
   --persist-best           Persist the best model from grid search
+  --impl=<dotted-name>     An alternative GridSearchCV implementation [default: sklearn.model_selection.GridSearchCV]
   -h --help                Show this screen.
 """
     arguments = docopt(grid_search_cmd.__doc__, argv=argv)
@@ -247,4 +250,5 @@ Options:
     grid_search(
         save_results=arguments['--save-results'],
         persist_best=arguments['--persist-best'],
+        impl=arguments['--impl'],
         )
